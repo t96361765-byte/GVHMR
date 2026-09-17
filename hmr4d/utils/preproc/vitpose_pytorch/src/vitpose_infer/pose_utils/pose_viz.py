@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torchvision
 import ffmpeg
+from hmr4d.utils.runtime_paths import ffmpeg_program
 
 
 def joints_dict():
@@ -273,7 +274,7 @@ def check_video_rotation(filename):
     # https://stackoverflow.com/questions/53097092/frame-from-video-is-upside-down-after-extracting/55747773#55747773
 
     # this returns meta-data of the video file in form of a dictionary
-    meta_dict = ffmpeg.probe(filename)
+    meta_dict = ffmpeg.probe(filename, cmd=ffmpeg_program("ffprobe"))
 
     # from the dictionary, meta_dict['streams'][0]['tags']['rotate'] is the key
     # we are looking for

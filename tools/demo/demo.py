@@ -1,3 +1,11 @@
+import os
+import sys
+import json
+from pathlib import Path
+
+# An explicitly invoked checkout must win over another editable installation.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import cv2
 import torch
 import pytorch_lightning as pl
@@ -6,7 +14,7 @@ import argparse
 from hmr4d.utils.pylogger import Log
 import hydra
 from hydra import initialize_config_module, compose
-from pathlib import Path
+from omegaconf import open_dict
 from pytorch3d.transforms import quaternion_to_matrix
 
 from hmr4d.configs import register_store_gvhmr
@@ -31,6 +39,9 @@ from hmr4d.utils.vis.renderer import Renderer, get_global_cameras_static, get_gr
 from tqdm import tqdm
 from hmr4d.utils.geo_transform import apply_T_on_points, compute_T_ayfz2ay
 from einops import einsum, rearrange
+from hmr4d import PROJ_ROOT
+from hmr4d.utils.export_smplx import save_smplx_animation, export_fbx
+from hmr4d.utils.runtime_paths import ffmpeg_program
 
 
 CRF = 23  # 17 is lossless, every +6 halves the mp4 size
@@ -52,10 +63,19 @@ def parse_args_to_cfg():
         "If the camera zoom in a lot, you can try 135, 200 or even larger values.",
     )
     parser.add_argument("--verbose", action="store_true", help="If true, draw intermediate results")
+    parser.add_argument("--no-render", action="store_true", help="Skip preview videos; keep animation export")
+    parser.add_argument("--export", choices=["npz", "fbx", "both", "none"], default="npz")
+    parser.add_argument("--blender", help="Optional path to blender.exe (D:/Blender Foundation preferred)")
+    parser.add_argument("--smplx-addon", help="Optional SMPL-X Blender add-on package directory")
+    parser.add_argument("--batch-size", type=int, default=4, help="ViTPose/HMR2 batch size; 4 for 8 GB GPUs")
     args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
 
     # Input
-    video_path = Path(args.video)
+    video_path = Path(args.video).expanduser().resolve()
+    output_root = str(Path(args.output_root).expanduser().resolve()) if args.output_root else None
+    os.chdir(PROJ_ROOT)
     assert video_path.exists(), f"Video not found at {video_path}"
     length, width, height = get_video_lwh(video_path)
     Log.info(f"[Input]: {video_path}")
@@ -63,7 +83,6 @@ def parse_args_to_cfg():
     # Cfg
     with initialize_config_module(version_base="1.3", config_module=f"hmr4d.configs"):
         overrides = [
-            f"video_name={video_path.stem}",
             f"static_cam={args.static_cam}",
             f"verbose={args.verbose}",
             f"use_dpvo={args.use_dpvo}",
@@ -72,25 +91,43 @@ def parse_args_to_cfg():
             overrides.append(f"f_mm={args.f_mm}")
 
         # Allow to change output root
-        if args.output_root is not None:
-            overrides.append(f"output_root={args.output_root}")
         register_store_gvhmr()
         cfg = compose(config_name="demo", overrides=overrides)
+        with open_dict(cfg):
+            cfg.video_name = video_path.stem
+            if output_root is not None:
+                cfg.output_root = output_root
+            cfg.no_render = args.no_render
+            cfg.export = args.export
+            cfg.blender = args.blender
+            cfg.smplx_addon = args.smplx_addon
+            cfg.batch_size = args.batch_size
 
     # Output
     Log.info(f"[Output Dir]: {cfg.output_dir}")
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.preprocess_dir).mkdir(parents=True, exist_ok=True)
 
+    # The model operates at 30 Hz. Resample rather than relabel 60/25 fps frames.
+    # Validate cache provenance so another video with the same name is not reused.
+    manifest = Path(cfg.output_dir) / "input_manifest.json"
+    signature = dict(source=str(video_path), size=video_path.stat().st_size,
+                     mtime_ns=video_path.stat().st_mtime_ns, fps=30,
+                     static_cam=bool(cfg.static_cam), f_mm=cfg.f_mm, use_dpvo=bool(cfg.use_dpvo))
+    if manifest.exists():
+        if json.loads(manifest.read_text(encoding="utf-8")) != signature:
+            raise ValueError("Input/camera settings changed. Use a new --output_root to avoid stale caches.")
+    elif Path(cfg.video_path).exists():
+        raise ValueError("Legacy output has no input manifest. Use a new --output_root.")
+
     # Copy raw-input-video to video_path
     Log.info(f"[Copy Video] {video_path} -> {cfg.video_path}")
-    if not Path(cfg.video_path).exists() or get_video_lwh(video_path)[0] != get_video_lwh(cfg.video_path)[0]:
-        reader = get_video_reader(video_path)
-        writer = get_writer(cfg.video_path, fps=30, crf=CRF)
-        for img in tqdm(reader, total=get_video_lwh(video_path)[0], desc=f"Copy"):
-            writer.write_frame(img)
-        writer.close()
-        reader.close()
+    if not Path(cfg.video_path).exists():
+        import ffmpeg
+        stream = ffmpeg.input(str(video_path)).video.filter("fps", fps=30)
+        stream = ffmpeg.output(stream, cfg.video_path, vcodec="libx264", crf=CRF, pix_fmt="yuv420p")
+        ffmpeg.run(stream, cmd=ffmpeg_program("ffmpeg"), overwrite_output=True, quiet=True)
+    manifest.write_text(json.dumps(signature, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return cfg
 
@@ -122,7 +159,7 @@ def run_preprocess(cfg):
 
     # Get VitPose
     if not Path(paths.vitpose).exists():
-        vitpose_extractor = VitPoseExtractor()
+        vitpose_extractor = VitPoseExtractor(batch_size=cfg.batch_size)
         vitpose = vitpose_extractor.extract(video_path, bbx_xys)
         torch.save(vitpose, paths.vitpose)
         del vitpose_extractor
@@ -136,7 +173,7 @@ def run_preprocess(cfg):
 
     # Get vit features
     if not Path(paths.vit_features).exists():
-        extractor = Extractor()
+        extractor = Extractor(batch_size=cfg.batch_size)
         vit_features = extractor.extract_video_features(video_path, bbx_xys)
         torch.save(vit_features, paths.vit_features)
         del extractor
@@ -149,7 +186,7 @@ def run_preprocess(cfg):
             if not cfg.use_dpvo:
                 simple_vo = SimpleVO(cfg.video_path, scale=0.5, step=8, method="sift", f_mm=cfg.f_mm)
                 vo_results = simple_vo.compute()  # (L, 4, 4), numpy
-                torch.save(vo_results, paths.slam)
+                torch.save(torch.from_numpy(vo_results), paths.slam)
             else:  # DPVO
                 from hmr4d.utils.preproc.slam import SLAMModel
 
@@ -165,7 +202,7 @@ def run_preprocess(cfg):
                     else:
                         break
                 slam_results = slam.process()  # (L, 7), numpy
-                torch.save(slam_results, paths.slam)
+                torch.save(torch.from_numpy(slam_results), paths.slam)
         else:
             Log.info(f"[Preprocess] slam results from {paths.slam}")
 
@@ -178,7 +215,10 @@ def load_data_dict(cfg):
     if cfg.static_cam:
         R_w2c = torch.eye(3).repeat(length, 1, 1)
     else:
-        traj = torch.load(cfg.paths.slam)
+        # This is our own local preprocessing cache, including legacy NumPy caches.
+        traj = torch.load(cfg.paths.slam, weights_only=False)
+        if isinstance(traj, torch.Tensor):
+            traj = traj.cpu().numpy()
         if cfg.use_dpvo:  # DPVO
             traj_quat = torch.from_numpy(traj[:, [6, 3, 4, 5]])
             R_w2c = quaternion_to_matrix(traj_quat).mT
@@ -325,10 +365,22 @@ if __name__ == "__main__":
         data_time = data["length"] / 30
         Log.info(f"[HMR4D] Elapsed: {Log.sync_time() - tic:.2f}s for data-length={data_time:.1f}s")
         torch.save(pred, paths.hmr4d_results)
+        del model
+        torch.cuda.empty_cache()
+
+    # Export also works when inference results were loaded from cache.
+    if cfg.export != "none":
+        pred = torch.load(paths.hmr4d_results, map_location="cpu", weights_only=True)
+        animation = Path(cfg.output_dir) / "smplx_neutral.npz"
+        save_smplx_animation(pred, animation)
+        Log.info(f"[Neutral SMPL-X] {animation}")
+        if cfg.export in ("fbx", "both"):
+            export_fbx(animation, animation.with_suffix(".fbx"), cfg.blender, cfg.smplx_addon)
 
     # ===== Render ===== #
-    render_incam(cfg)
-    render_global(cfg)
-    if not Path(paths.incam_global_horiz_video).exists():
-        Log.info("[Merge Videos]")
-        merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)
+    if not cfg.no_render:
+        render_incam(cfg)
+        render_global(cfg)
+        if not Path(paths.incam_global_horiz_video).exists():
+            Log.info("[Merge Videos]")
+            merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)

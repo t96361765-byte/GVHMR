@@ -6,6 +6,7 @@ import shutil
 import ffmpeg
 from tqdm import tqdm
 import cv2
+from hmr4d.utils.runtime_paths import ffmpeg_program
 
 
 def get_video_lwh(video_path):
@@ -101,7 +102,7 @@ def merge_videos_horizontal(in_video_paths: list, out_video_path: str):
     inputs = [ffmpeg.input(path) for path in in_video_paths]
     merged_video = ffmpeg.filter(inputs, "hstack", inputs=len(inputs))
     output = ffmpeg.output(merged_video, out_video_path)
-    ffmpeg.run(output, overwrite_output=True, quiet=True)
+    ffmpeg.run(output, cmd=ffmpeg_program("ffmpeg"), overwrite_output=True, quiet=True)
 
 
 def merge_videos_vertical(in_video_paths: list, out_video_path: str):
@@ -110,4 +111,4 @@ def merge_videos_vertical(in_video_paths: list, out_video_path: str):
     inputs = [ffmpeg.input(path) for path in in_video_paths]
     merged_video = ffmpeg.filter(inputs, "vstack", inputs=len(inputs))
     output = ffmpeg.output(merged_video, out_video_path)
-    ffmpeg.run(output, overwrite_output=True, quiet=True)
+    ffmpeg.run(output, cmd=ffmpeg_program("ffmpeg"), overwrite_output=True, quiet=True)

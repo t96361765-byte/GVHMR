@@ -1,5 +1,9 @@
 # Install
 
+For Windows 11 / RTX 5060 inference and neutral SMPL-X animation export, follow
+[WINDOWS.md](WINDOWS.md). That path uses a separate modern dependency set; do not
+install the legacy requirements below into the Windows environment.
+
 ## Environment
 
 ```bash

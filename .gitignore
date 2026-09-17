@@ -2,6 +2,7 @@
 .hydra
 inputs
 outputs
+tools/ffmpeg/
 
 # All file or folders start with tmp will be ignored
 tmp*  

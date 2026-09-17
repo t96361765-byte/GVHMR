@@ -1,0 +1,7 @@
+# Prevent a dependency install from replacing the tested CUDA build.
+torch==2.11.0+cu130
+torchvision==0.26.0+cu130
+numpy==2.2.6
+pytorch3d==0.7.9
+chumpy==0.70
+
