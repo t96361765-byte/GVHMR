@@ -80,3 +80,37 @@ We thank the authors of
 [WHAM](https://github.com/yohanshin/WHAM),
 [4D-Humans](https://github.com/shubham-goel/4D-Humans),
 and [ViTPose-Pytorch](https://github.com/gpastal24/ViTPose-Pytorch) for their great works, without which our project/code would not be possible.
+
+
+
+# User's commands
+
+## Step1: 激活环境与进入项目
+
+``` powershell
+conda activate GVHMR
+Set-Location "D:\GitHub\GVHMR"
+```
+
+## Step2: 运行GVHMR人体重建链路
+
+输出格式为（input为视频文件名）：
+D:\track_dataset\GVHMR_results\input\
+├── hmr4d_results.pt                 原始预测，包含世界和相机坐标参数
+├── smplx_neutral.npz                中性 SMPL-X 动画参数
+├── smplx_neutral.fbx                中性 SMPL-X 网格与骨骼动画
+├── 0_input_video.mp4                重采样至 30 fps 的输入
+├── 1_incam.mp4                      原视频叠加人体的预览
+├── 2_global.mp4                     世界坐标下的人体运动预览
+├── input_3_incam_global_horiz.mp4    两种视角的并排预览
+└── preprocess\                     预处理缓存
+
+移动相机视角下，去掉-s；不需要预览视频时，末尾加--no-render
+
+``` powershell
+python "D:\GitHub\GVHMR\tools\demo\demo.py" `
+--video "D:\track_dataset\20260625_mushroom_mp4\20260625_mushroom2.mp4" `
+--output_root "D:\track_dataset\GVHMR_results" -s `
+--batch-size 4 `
+--export fbx
+```
