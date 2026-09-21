@@ -109,8 +109,10 @@ D:\track_dataset\GVHMR_results\input\
 
 ``` powershell
 python "D:\GitHub\GVHMR\tools\demo\demo.py" `
---video "D:\track_dataset\FLARE_MP4_VIDEO\mushroom_flare\mushroom_child_8.mp4" `
---output_root "D:\track_dataset\GVHMR_results" `
+--video "D:\track_dataset\FLARE_MP4_VIDEO\mushroom_flare\mushroom_child_4.mp4" `
+--output_root "D:\track_dataset\GVHMR_results" -s `
 --batch-size 4 `
 --export fbx
 ```
+
+## Step3：结合动捕BVH进行GVHMR轨迹优化

@@ -1,0 +1,15 @@
+{
+  "fps": 30,
+  "keep_range": [24, 266],
+  "circle_range": [92, 223],
+  "evaluation_cycle_boundaries": [104, 133, 162, 190, 222],
+  "bvh_circle_range": [740, 1170],
+  "initial_wrist_height_m": 0.70,
+  "initial_radius_m": 0.37,
+  "initial_top_m": 0.64,
+  "wrist_surface_offset_m": 0.055,
+  "extra_hand_contacts": [[45, 92, 0], [45, 92, 1], [223, 227, 0]],
+  "ground_contacts": [[24, 47, 0], [24, 47, 1], [237, 266, 0], [237, 266, 1]],
+  "apparatus_pixels": [[970, 655], [795, 720], [1145, 720], [970, 923]],
+  "annotation_notes": "Frame indices are zero-based, end-exclusive. Coarse stage/contact ranges and apparatus landmarks were inspected in the original 1920x1080 video. Apparatus landmarks are approximate, not a measured camera calibration. Per-circle phase and BVH alignment are computed from the motion."
+}
