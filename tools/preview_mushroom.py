@@ -18,7 +18,8 @@ def preview(folder):
     for col,(j,title) in enumerate([(old,'Original GVHMR world'),(new,'Refined world')]):
         centers=np.array([j[s:e,[20,21]].mean((0,1)) for s,e in zip(cuts[:-1],cuts[1:])]);shift=centers[0].copy();shift[2]=0
         for k,(s,e) in enumerate(zip(cuts[:-1],cuts[1:])):
-            p=j[s:e,[7,8]].mean(1)-shift
+            # Include the shared boundary sample to avoid a plotting-only gap.
+            p=j[s:e+1,[7,8]].mean(1)-shift
             axs[0,col].plot(p[:,0],p[:,1],color=colors[k%len(colors)],label=f'Cycle {k+1}')
         axs[0,col].scatter(centers[:,0]-shift[0],centers[:,1]-shift[1],marker='x',c='black')
         axs[0,col].set(title=title,xlim=(-1.35,1.35),ylim=(-1.5,1.2),xlabel='X (m)',ylabel='Y (m)');axs[0,col].set_aspect('equal');axs[0,col].grid(alpha=.2)
@@ -26,7 +27,7 @@ def preview(folder):
         axs[1,col].set(xlabel='Complete cycle',ylabel='Mean wrist-center displacement (cm)',ylim=(-55,45));axs[1,col].grid(alpha=.2);axs[1,col].legend()
     axs[0,0].legend();fig.suptitle('Ankle midpoint paths and cycle-mean wrist centers (not center of mass)\nOne constant display translation per sequence; no per-cycle alignment')
     fig.tight_layout();fig.savefig(folder/'trajectory_comparison.png',dpi=170);plt.close(fig)
-    K=a['K'];kp=a['keypoints'];oldc=a['original_coco_incam'];newc=a['corrected_coco_incam']
+    K=a['K'];oldc=a['original_coco_incam'];newc=a['corrected_coco_incam']
     def uv(q):return q[...,:2]/q[...,2:]*K[[0,1],[0,1]]+K[:2,2]
     olduv=uv(oldc);newuv=uv(newc)
     cap=cv2.VideoCapture(prov['source_video']);fps=cfg['fps'];frames=[];ks,ke=cfg['keep_range']

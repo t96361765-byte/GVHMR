@@ -22,6 +22,7 @@ def material(name,color):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--input',required=True);p.add_argument('--addon',required=True)
     args=p.parse_args(sys.argv[sys.argv.index('--')+1:]);folder=Path(args.input).resolve()
+    bpy.context.preferences.filepaths.save_version=0
     cfg=json.loads((folder/'config.json').read_text());data=np.load(folder/'diagnostics.npz');ks,ke=cfg['keep_range']
     sys.path.insert(0,str(Path(args.addon).resolve().parent))
     import smplx_blender_addon
