@@ -48,6 +48,8 @@ DEFAULT_CONSTRAINTS = {
         "wrist_height_slack_m": 0.015,
         "support_smoothing_seconds": 0.05,
         "support_wrist_pose_relaxation_rad": 0.60,
+        "self_collision_tolerance_m": 0.001,
+        "self_collision_sigma_m": 0.02,
         "weights": {
             "height": 1.0,
             "radial": 0.6,
@@ -58,6 +60,7 @@ DEFAULT_CONSTRAINTS = {
             "palm_surface": 0.35,
             "orientation": 0.6,
             "preparation_pose": 0.06,
+            "self_collision": 2.0,
         },
         "detection": {
             "horizontal_margin_ratio": 0.10,
@@ -79,6 +82,11 @@ DEFAULT_CONSTRAINTS = {
             "bvh_hand_speed_m_s": 0.30,
             "bvh_height_tolerance_m": 0.085,
             "bvh_horizontal_radius_m": 0.32,
+            "release_enabled": True,
+            "release_lift_forearm_start": 0.12,
+            "release_lift_forearm_end": 0.40,
+            "release_lift_width_start": 0.02,
+            "release_lift_width_end": 0.12,
         },
     },
     "legs": {
@@ -145,6 +153,8 @@ PRESETS = {
     "no-legs": {"legs": {"enabled": False}},
     "no-feet": {"feet": {"enabled": False}},
     "no-palm-orientation": {"hands": {"weights": {"orientation": 0.0}}},
+    "no-hand-release": {"hands": {"detection": {"release_enabled": False}}},
+    "no-arm-body-collision": {"hands": {"weights": {"self_collision": 0.0}}},
     "no-local-stages": {"legs": {"enabled": False}, "feet": {"enabled": False}},
 }
 
@@ -235,6 +245,11 @@ def validate_constraints(config):
         raise ValueError("Invalid palm minimum confidence")
     if not 0 <= hands["wrist_height_slack_m"] <= 0.03:
         raise ValueError("Invalid wrist height slack")
+    if hands["self_collision_sigma_m"] <= 0:
+        raise ValueError("hands.self_collision_sigma_m must be positive")
+    for unit in ["forearm", "width"]:
+        if not det[f"release_lift_{unit}_start"] < det[f"release_lift_{unit}_end"]:
+            raise ValueError(f"Invalid hand release {unit} ramp")
     if not 0 < feet["orientation_tolerance_deg"] < 45:
         raise ValueError("Invalid foot orientation tolerance")
     if feet["ground_sigma_m"] <= 0:

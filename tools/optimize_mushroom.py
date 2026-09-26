@@ -16,18 +16,12 @@ DEFAULT_BLENDER = r"D:\Blender Foundation\Blender 5.1\blender.exe"
 DEFAULT_ADDON = r"D:\Blender Foundation\smplx_blender_addon-1.0.3-20260511\smplx_blender_addon"
 
 
-def annotate(frame):
-    """Return original-resolution landmarks and a user-selected background ROI."""
+def annotate_apparatus(frame):
+    """Return original-resolution apparatus landmarks, independently of background."""
     import cv2
 
     scale = min(1.0, 1200 / frame.shape[1], 800 / frame.shape[0])
     display = cv2.resize(frame, None, fx=scale, fy=scale)
-    name = "Static background: drag a rectangle, ENTER to accept, C to cancel"
-    x, y, w, h = cv2.selectROI(name, display, showCrosshair=True)
-    cv2.destroyAllWindows()
-    if w <= 0 or h <= 0:
-        raise ValueError("Background annotation cancelled")
-    roi = [round(v / scale) for v in (x, y, x + w, y + h)]
     points = []
     labels = ["Top axis center", "Left cap rim", "Right cap rim", "Base front ground point"]
     name = "Mushroom: click 4 points; R resets; ENTER accepts; ESC cancels"
@@ -54,7 +48,7 @@ def annotate(frame):
             if key in (ord("r"), ord("R")):
                 points.clear()
             if key in (10, 13) and len(points) == 4:
-                return points, roi
+                return points
     finally:
         cv2.destroyAllWindows()
 
@@ -76,7 +70,10 @@ def main():
     p.add_argument("--config", help="Optional per-video annotations JSON; command line frame ranges take precedence")
     p.add_argument("--constraints", help="Reusable constraint JSON from configure_mushroom_constraints.py")
     p.add_argument("--reference-frame", type=int)
+    p.add_argument("--reselect-background", action="store_true", help="Reopen background selection; preserve apparatus landmarks")
     p.add_argument("--camera", choices=["jitter", "static"], default="jitter")
+    p.add_argument("--camera-tracking", choices=["balanced", "strict"], default="balanced",
+                   help="Background tracking tolerances; balanced accepts modest feature loss and model residual")
     p.add_argument("--iterations", type=int, help="Override base.iterations in the constraint config")
     p.add_argument("--blender", default=DEFAULT_BLENDER)
     p.add_argument("--addon", default=DEFAULT_ADDON)
@@ -90,6 +87,8 @@ def main():
         "--dry-run", action="store_true", help="Validate and print commands without writing or running optimization"
     )
     args = p.parse_args()
+    if args.reselect_background and (args.dry_run or args.camera == "static"):
+        p.error("--reselect-background requires an interactive --camera jitter run (omit --dry-run)")
     folder = Path(args.input).resolve()
     if folder.is_file():
         folder = folder.parent
@@ -147,13 +146,30 @@ def main():
     cap.release()
     if not ok:
         p.error("Cannot decode annotation frame")
-    if not cfg.get("apparatus_pixels") or not cfg.get("camera_roi"):
+    if args.camera == "jitter":
+        from tools.estimate_mushroom_camera import BackgroundTrackingError, estimate, load_person_tracks, select_background
+
+        boxes, poses = load_person_tracks(folder)
+        if len(boxes) != count:
+            p.error("Video and person bounding boxes have different frame counts")
+
+        def choose_background():
+            try:
+                return select_background(frame, boxes[reference], cfg.get("camera_roi"), None if poses is None else poses[reference])
+            except BackgroundTrackingError as exc:
+                p.exit(1, f"{exc}\n")
+
+        if args.reselect_background or not cfg.get("camera_roi"):
+            if args.dry_run:
+                p.error("New video needs camera_roi. Run normally for interactive selection, or provide --config.")
+            cfg["camera_roi"] = choose_background()
+    if not cfg.get("apparatus_pixels"):
         if args.dry_run:
             p.error(
-                "New video needs annotations. Run normally for interactive setup, or provide --config with apparatus_pixels and camera_roi."
+                "New video needs apparatus_pixels. Run normally for interactive setup, or provide --config."
             )
-        print("Select stable background, then top center / left rim / right rim / base front ground point.", flush=True)
-        cfg["apparatus_pixels"], cfg["camera_roi"] = annotate(frame)
+        print("Select top center / left rim / right rim / base front ground point.", flush=True)
+        cfg["apparatus_pixels"] = annotate_apparatus(frame)
     if cfg.get("keep_range") != [args.start, args.end] or cfg.get("circle_range") != [
         args.circle_start,
         args.circle_end,
@@ -189,17 +205,18 @@ def main():
         config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     camera_args = []
     if args.camera == "jitter":
-        run(
-            "estimate_mushroom_camera.py",
-            "--input",
-            folder,
-            "--output",
-            camera,
-            "--roi",
-            *cfg["camera_roi"],
-            "--reference-frame",
-            reference,
-        )
+        if args.dry_run:
+            run("estimate_mushroom_camera.py", "--input", folder, "--output", camera,
+                "--roi", *cfg["camera_roi"], "--reference-frame", reference, "--tracking-mode", args.camera_tracking)
+        else:
+            while True:
+                try:
+                    estimate(folder, cfg["camera_roi"], reference, camera, mode=args.camera_tracking)
+                    break
+                except BackgroundTrackingError as exc:
+                    print(f"Background tracking failed: {exc}\nReselect background; apparatus landmarks are preserved.", flush=True)
+                    cfg["camera_roi"] = choose_background()
+                    config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         camera_args = ["--camera-motion", camera / "camera_motion.npz"]
     run(
         "refine_mushroom.py",

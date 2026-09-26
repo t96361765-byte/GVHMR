@@ -36,6 +36,8 @@
     "wrist_height_slack_m": 0.015,
     "support_smoothing_seconds": 0.05,
     "support_wrist_pose_relaxation_rad": 0.6,
+    "self_collision_tolerance_m": 0.001,
+    "self_collision_sigma_m": 0.02,
     "weights": {
       "height": 1.0,
       "radial": 0.6,
@@ -45,7 +47,8 @@
       "collision": 0.35,
       "palm_surface": 0.35,
       "orientation": 0.6,
-      "preparation_pose": 0.06
+      "preparation_pose": 0.06,
+      "self_collision": 2.0
     },
     "detection": {
       "horizontal_margin_ratio": 0.1,
@@ -66,7 +69,12 @@
       "minimum_support_seconds": 0.13,
       "bvh_hand_speed_m_s": 0.3,
       "bvh_height_tolerance_m": 0.085,
-      "bvh_horizontal_radius_m": 0.32
+      "bvh_horizontal_radius_m": 0.32,
+      "release_enabled": true,
+      "release_lift_forearm_start": 0.12,
+      "release_lift_forearm_end": 0.4,
+      "release_lift_width_start": 0.02,
+      "release_lift_width_end": 0.12
     }
   },
   "legs": {

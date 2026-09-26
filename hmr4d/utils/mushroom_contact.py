@@ -1,8 +1,119 @@
-"""Soft, contact-gated palm geometry; no constraint on airborne palm direction."""
+"""Hand release detection, shared support gates and arm/body surface constraints."""
 
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter1d
+from pytorch3d.ops import knn_points
+
+
+def hand_release_weights(joints, keypoints, cfg, options):
+    """Airborne evidence overrides unpaired BVH contact timing during circles.
+
+    Relative wrist height removes root drift; forearm length and apparatus width
+    normalize performer size and image scale. Complementary cues protect lifts
+    at zero image velocity (the apex), where stationarity alone implies contact.
+    Low-confidence observations cannot confidently veto support. No frame IDs,
+    performer-specific thresholds, circle count, or fixed left/right order.
+    """
+    count = len(joints)
+    release = np.zeros((count, 2))
+    if not options["release_enabled"]:
+        return release
+    ss, se = cfg["circle_range"]
+    fps = cfg.get("fps", 30)
+    sigma = max(0.5, options["video_smoothing_seconds"] * fps)
+    wrists = gaussian_filter1d(joints[:, [20, 21]], sigma, axis=0)
+    forearm = np.median(np.linalg.norm(joints[ss:se, [20, 21]] - joints[ss:se, [18, 19]], axis=-1), axis=0)
+    height = (wrists[:, :, 2] - wrists[:, ::-1, 2]) / np.maximum(forearm, 1e-4)
+
+    def ramp(value, unit):
+        lo, hi = [options[f"release_lift_{unit}_{end}"] for end in ["start", "end"]]
+        x = np.clip((value - lo) / (hi - lo), 0, 1)
+        return x * x * (3 - 2 * x)
+
+    confidence = gaussian_filter1d(keypoints[:, [9, 10], 2].clip(0, 1), sigma, axis=0)
+    reliability = np.clip(
+        (confidence - options["hand_confidence"]) / max(0.8 - options["hand_confidence"], 0.05), 0, 1
+    )
+    # Relative 3D height compares two wrists; both observations must be credible.
+    release = ramp(height, "forearm") * reliability.min(1, keepdims=True)
+    if cfg.get("apparatus_pixels"):
+        ap = np.asarray(cfg["apparatus_pixels"])
+        width = max(np.linalg.norm(ap[2] - ap[1]), 1.0)
+        uv = gaussian_filter1d(keypoints[:, [9, 10], :2], sigma, axis=0)
+        # Compare against the support region, not the other image wrist: two
+        # supported hands at different depths can have unequal image heights.
+        # Image-up assumes the upright videos accepted by this pipeline.
+        upper = ap[0, 1] - options["top_margin_ratio"] * width
+        release = np.maximum(release, ramp((upper - uv[:, :, 1]) / width, "width") * reliability)
+    release[:ss] = release[se:] = 0
+    return release
+
+
+def arm_body_regions(model):
+    """Disjoint forearm/hand versus torso/head/leg surfaces; exclude arm seams.
+
+    Deterministic sparse triangles/points limit optimization cost. These are
+    anatomical regions of the actual SMPL-X mesh, so shape follows source betas.
+    """
+    weights = model.lbs_weights.detach().cpu().numpy()
+    faces = np.asarray(model.faces, dtype=np.int64)
+    body = weights[:, list(range(13)) + [15, 22, 23, 24]].sum(-1) > 0.7
+    arm = weights[:, [18, 19, 20, 21] + list(range(25, 55))].sum(-1) > 0.55
+    return faces[body[faces].all(1)][::3].copy(), np.flatnonzero(arm)[::4].copy()
+
+
+class ArmBodyCollision:
+    """Local signed distance to nearby body triangles, differentiable in pose.
+
+    This sampled surface penalty is not a global watertight SDF or a collision-
+    free guarantee. It excludes adjacent arm surfaces and allows soft contact.
+    """
+
+    def __init__(self, faces, arm_ids, vertex_ids, device, options):
+        size = int(max(np.max(vertex_ids), np.max(faces), np.max(arm_ids))) + 1
+        remap = np.full(size, -1, dtype=int)
+        remap[np.asarray(vertex_ids)] = np.arange(len(vertex_ids))
+        if (remap[faces] < 0).any() or (remap[arm_ids] < 0).any():
+            raise ValueError("Arm/body surface vertices missing; rerun the base stage with the current constraints")
+        self.faces = torch.as_tensor(remap[faces], device=device)
+        self.arms = torch.as_tensor(remap[arm_ids], device=device)
+        self.tolerance = options["self_collision_tolerance_m"]
+        self.sigma = options["self_collision_sigma_m"]
+
+    def __call__(self, vertices):
+        points = vertices[:, self.arms]
+        triangles = vertices[:, self.faces]
+        with torch.no_grad():
+            ids = knn_points(points.detach(), triangles.detach().mean(2), K=min(8, len(self.faces))).idx
+        batch = torch.arange(len(vertices), device=vertices.device)[:, None, None]
+        tri = triangles[batch, ids]
+        p = points[:, :, None]
+        a, b, c = tri.unbind(-2)
+        u, v = b - a, c - a
+        normal = torch.nn.functional.normalize(torch.linalg.cross(u, v), dim=-1)
+        plane = ((p - a) * normal).sum(-1)
+        projection = p - plane[..., None] * normal
+        rel = projection - a
+        uu, vv, uv = (u * u).sum(-1), (v * v).sum(-1), (u * v).sum(-1)
+        ru, rv = (rel * u).sum(-1), (rel * v).sum(-1)
+        den = (uu * vv - uv.square()).clamp_min(1e-12)
+        s, t = (ru * vv - rv * uv) / den, (rv * uu - ru * uv) / den
+        inside = (s >= 0) & (t >= 0) & (s + t <= 1)
+        candidates = [projection]
+        distances = [torch.where(inside, plane.square(), torch.full_like(plane, float("inf")))]
+        for start, end in [(a, b), (b, c), (c, a)]:
+            edge = end - start
+            alpha = (((p - start) * edge).sum(-1) / edge.square().sum(-1).clamp_min(1e-12)).clamp(0, 1)
+            closest = start + alpha[..., None] * edge
+            candidates.append(closest)
+            distances.append((p - closest).square().sum(-1))
+        distance, choice = torch.stack(distances, -1).min(-1)
+        closest = torch.stack(candidates, -2).gather(-2, choice[..., None, None].expand(*choice.shape, 1, 3)).squeeze(-2)
+        nearest = distance.argmin(-1, keepdim=True)
+        signed = ((p - closest) * normal).sum(-1).gather(-1, nearest).squeeze(-1)
+        excess = torch.relu(-signed - self.tolerance) / self.sigma
+        return excess.square().topk(min(8, excess.shape[1]), dim=1).values.mean()
 
 
 def support_weights(contact, fps, keep_range, minimum=0.2, smoothing_seconds=0.05):

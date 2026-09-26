@@ -6,7 +6,7 @@ import torch
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle, matrix_to_rotation_6d
 from hmr4d.utils.body_model.smplx_lite import SmplxLite, SmplxLiteV437Coco17
 from hmr4d.utils.mushroom_refine import BODY_MAP, Y_TO_Z, fk, project, cycle_metrics, reprojection_metrics
-from hmr4d.utils.mushroom_contact import palm_surface_gaps
+from hmr4d.utils.mushroom_contact import palm_surface_gaps, arm_body_regions, ArmBodyCollision
 from hmr4d.utils.mushroom_priors import trajectory_statistics, circle_envelope
 from hmr4d.utils.mushroom_config import resolve_constraints, pixel_scale, weighted_loss, constraint_hash
 
@@ -112,12 +112,16 @@ def refine_closed_legs(prediction, arrays, metrics, bvh, cfg, iterations=None, d
     N = lambda x: x.detach().cpu().numpy()
     model = SmplxLiteV437Coco17().eval()
     dense = SmplxLite().eval()
+    body_faces, arm_ids = arm_body_regions(dense)
     vids = torch.tensor(arrays["surface_vertex_ids"], dtype=torch.long)
     for name in ["v_template", "shapedirs", "lbs_weights"]:
         setattr(model, name, torch.cat([getattr(model, name)[:132], getattr(dense, name)[vids]], 0))
     model.posedirs = torch.cat([model.posedirs[:, :132], dense.posedirs[:, vids]], 1)
     del dense
     model = model.to(device)
+    hand_options = constraints["hands"]
+    arm_weight = hand_options["weights"]["self_collision"] if hand_options["enabled"] else 0.0
+    arm_collision = ArmBodyCollision(body_faces, arm_ids, vids.numpy(), device, hand_options) if arm_weight else None
     B = T(Y_TO_Z)
     indices = torch.as_tensor(active, dtype=torch.long, device=device)
     gate = T(envelope[active])
@@ -254,6 +258,9 @@ def refine_closed_legs(prediction, arrays, metrics, bvh, cfg, iterations=None, d
             pose_preservation=preservation,
         )
         loss = weighted_loss(terms, weights)
+        if arm_collision is not None:
+            # Legs may move toward an immutable hand during this stage.
+            loss = loss + arm_weight * arm_collision(v)
         if not torch.isfinite(loss):
             raise FloatingPointError("Nonfinite closed-leg loss")
         loss.backward()

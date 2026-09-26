@@ -22,6 +22,9 @@ from hmr4d.utils.mushroom_contact import (
     cap_inward_normal,
     palm_orientation_loss,
     palm_surface_gaps,
+    hand_release_weights,
+    arm_body_regions,
+    ArmBodyCollision,
 )
 from hmr4d.utils.mushroom_config import resolve_constraints, pixel_scale, weighted_loss, constraint_hash
 
@@ -271,10 +274,16 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
     # Dense surface coverage is needed near wrists/feet: the 437 preview vertices
     # miss narrow but deep penetrations. Retain the exact 132-vertex COCO regressor.
     dense = SmplxLite()
+    body_faces, arm_ids = arm_body_regions(dense)
     extremity = dense.lbs_weights[:, [7, 8, 10, 11, 20, 21] + list(range(25, 55))].sum(-1) > 0.25
     vids = torch.unique(
         torch.cat(
-            [torch.arange(0, len(dense.v_template), int(cfg.get("surface_stride", 3))), torch.where(extremity)[0]]
+            [
+                torch.arange(0, len(dense.v_template), int(cfg.get("surface_stride", 3))),
+                torch.where(extremity)[0],
+                torch.as_tensor(body_faces.reshape(-1)),
+                torch.as_tensor(arm_ids),
+            ]
         )
     )
     for name in ["v_template", "shapedirs", "lbs_weights"]:
@@ -282,6 +291,7 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
     model.posedirs = torch.cat([model.posedirs[:, :132], dense.posedirs[:, vids]], 1)
     del dense
     model = model.to(device)
+    arm_collision = ArmBodyCollision(body_faces, arm_ids, vids.numpy(), device, hand_options)
 
     def T(a):
         return torch.as_tensor(a, dtype=torch.float32, device=device)
@@ -396,26 +406,31 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
         observed = gate * np.exp(-((velocity / (detection["circle_speed_sigma_px_s"] * px_scale)) ** 2))
         contact = (detection["bvh_contact_fraction"] * contact + detection["video_contact_fraction"] * observed) * gate
         contact[ss:se] /= np.maximum(contact[ss:se].max(1, keepdims=True), detection["minimum_circle_contact"])
+    release = hand_release_weights(jn, stable_kp, cfg, detection)
+    contact *= 1 - release
     contact[:ss] = 0
     contact[se:] = 0
     contact = np.maximum(contact, stage_contact)
     for start, end, side in cfg.get("extra_hand_contacts", []):
         contact[start:end, side] = 1
+    raw_contact = contact.copy()
+    # Height, radial attraction and slip must release with the palm, not retain
+    # a small but stiff attraction throughout a clearly airborne interval.
+    if detection["release_enabled"]:
+        contact = support_weights(
+            contact, fps, [ks, ke], hand_options["contact_min_confidence"], hand_options["support_smoothing_seconds"]
+        )
     contact = T(contact)
     ref = T(ref)
     phase_t = T(phase)
     palm_contact = contact.clone()
     if preparation_only:
         palm_contact[ss:] = 0
-    palm_support = T(
-        support_weights(
-            N(palm_contact),
-            fps,
-            [ks, ke],
-            hand_options["contact_min_confidence"],
-            hand_options["support_smoothing_seconds"],
-        )
-    )
+    palm_support = palm_contact.clone()
+    if not detection["release_enabled"]:
+        palm_support = T(support_weights(
+            N(palm_contact), fps, [ks, ke], hand_options["contact_min_confidence"], hand_options["support_smoothing_seconds"]
+        ))
     if not hand_options["enabled"]:
         palm_support.zero_()
     orientation_weight = hand_weights["orientation"]
@@ -551,6 +566,7 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
             else v.new_zeros(())
         )
         orientation_loss = v.new_zeros(())
+        self_collision_loss = arm_collision(v[ks:ke]) if full and hand_weights["self_collision"] else v.new_zeros(())
         if full:
             palm_normals = torch.einsum("tsij,sj->tsi", B @ wrist_rotations[:, [20, 21]], palm_rest_normals)
             target_normal = cap_inward_normal(wrist, radius, dome)
@@ -615,6 +631,7 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
             preparation_pose=prep_loss,
             palm_surface=palm_loss,
             orientation=orientation_loss,
+            self_collision=self_collision_loss,
         )
         loss = weighted_loss(terms, {**base_weights, **hand_weights})
         if not torch.isfinite(loss):
@@ -646,6 +663,7 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
                 preparation=scalar(prep_loss),
                 palm=scalar(palm_loss),
                 palm_orientation=scalar(orientation_loss),
+                arm_body_collision=scalar(self_collision_loss),
                 periodic=0.0,
             )
             history.append(row)
@@ -695,6 +713,8 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
             phase=phase,
             cycle_boundaries=np.array(cuts),
             contact=N(contact),
+            contact_before_smoothing=raw_contact,
+            hand_release_weight=release,
             reference_joints_zup=N(ref),
             camera_R_zup_to_camera=N(cameras),
             camera_t=N(camera_trans),
@@ -754,6 +774,11 @@ def refine(prediction, kp, bvh, cfg, iterations=None, device="cuda", callback=No
                 phase_refinement=False,
                 image_weight=base_weights["image"],
                 hands_enabled=hand_options["enabled"],
+                hand_release_enabled=detection["release_enabled"],
+                arm_body_collision_weight=hand_weights["self_collision"],
+                hand_contact_method=(
+                    "relative_wrist_lift_confidence_and_shared_support_gate" if detection["release_enabled"] else "legacy"
+                ),
                 palm_contact_scope="preparation_only" if preparation_only else "all_inferred_contacts",
                 palm_orientation_weight=orientation_weight,
                 palm_orientation_tolerance_deg=orientation_tolerance,

@@ -7,13 +7,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 import torch
 from hmr4d.utils.mushroom_priors import infer_bvh_support, infer_video_support, trajectory_statistics
-from hmr4d.utils.mushroom_contact import support_weights, palm_orientation_loss
+from hmr4d.utils.mushroom_contact import support_weights, palm_orientation_loss, hand_release_weights, ArmBodyCollision
+from hmr4d.utils.mushroom_config import resolve_constraints
 from hmr4d.utils.mushroom_legs import circle_envelope
 from hmr4d.utils.mushroom_feet import bvh_foot_prior
 from hmr4d.utils.mushroom_io import save_diagnostics
 
 
 class MushroomPriorsTest(unittest.TestCase):
+    def test_airborne_apex_releases_despite_zero_velocity_and_strong_bvh(self):
+        j=np.zeros((100,22,3));j[:,[18,19],0]=.25
+        j[35:65,20,2]=.18;j[35:65,18,2]=.18
+        kp=np.zeros((100,17,3));kp[:,:,2]=.95
+        cfg=dict(circle_range=[20,80],fps=30)
+        options=resolve_constraints()['hands']['detection']
+        release=hand_release_weights(j,kp,cfg,options)
+        gate=support_weights(np.ones((100,2))*(1-release),30,[0,100])
+        self.assertEqual(gate[45:55,0].max(),0.)
+        self.assertGreater(gate[45:55,1].min(),.99)
+        self.assertFalse(release[:20].any())
+        self.assertFalse(release[80:].any())
+        # Body scale and root drift must not change inferred release.
+        moved=j*1.7+np.arange(100)[:,None,None]*np.array([.02,.03,.04])
+        np.testing.assert_allclose(release,hand_release_weights(moved,kp,cfg,options),atol=1e-12)
+        # Switching anatomical sides must switch, not invert, the decision.
+        swapped=j.copy();swapped[:,[18,19,20,21]]=j[:,[19,18,21,20]]
+        np.testing.assert_allclose(release[:,::-1],hand_release_weights(swapped,kp,cfg,options))
+
+    def test_image_release_is_scale_invariant_and_requires_confidence(self):
+        j=np.zeros((100,22,3));j[:,[18,19],0]=.25
+        kp=np.zeros((100,17,3));kp[:,:,2]=.95;kp[:,9,1]=20;kp[:,10,1]=150
+        ap=np.array([[100,150],[0,175],[200,175],[100,250]])
+        cfg=dict(circle_range=[20,80],fps=30,apparatus_pixels=ap.tolist())
+        options=resolve_constraints()['hands']['detection']
+        release=hand_release_weights(j,kp,cfg,options)
+        self.assertEqual(release[50,0],1.)
+        kp[:,:,:2]*=.5;cfg['apparatus_pixels']=(ap*.5).tolist()
+        np.testing.assert_allclose(release,hand_release_weights(j,kp,cfg,options))
+        # Perspective alone is not flight: both wrists remain in the cap region.
+        kp[:,9,1]=50;kp[:,10,1]=75
+        self.assertFalse(hand_release_weights(j,kp,cfg,options).any())
+        kp[:,9,1]=10
+        kp[:,:,2]=.1
+        self.assertFalse(hand_release_weights(j,kp,cfg,options).any())
+
+    def test_arm_body_penalty_has_outward_gradient_and_no_free_space_attraction(self):
+        options=resolve_constraints()['hands']
+        collision=ArmBodyCollision(np.array([[0,1,2]]),np.array([3,4]),np.arange(5),'cpu',options)
+        vertices=torch.tensor([[[0.,0,0],[1,0,0],[0,1,0],[.2,.2,-.1],[.2,.2,.1]]],requires_grad=True)
+        loss=collision(vertices);loss.backward()
+        self.assertTrue(torch.isfinite(vertices.grad).all())
+        self.assertLess(vertices.grad[0,3,2].item(),0.)
+        torch.testing.assert_close(vertices.grad[0,4],torch.zeros(3))
+        np.testing.assert_allclose(collision(vertices.detach()+3).item(),loss.item(),rtol=1e-5)
+        rotation=torch.tensor([[0.,0,1],[1,0,0],[0,1,0]])
+        np.testing.assert_allclose(collision(vertices.detach()@rotation.T).item(),loss.item(),rtol=1e-5)
+
     def test_foot_prior_is_relative_to_shin_not_world_heading(self):
         from scipy.spatial.transform import Rotation
         names=['LeftHip','RightHip','LeftKnee','RightKnee','LeftAnkle','RightAnkle','LeftToe','RightToe']

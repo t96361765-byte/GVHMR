@@ -49,6 +49,8 @@ class MushroomConfigTest(unittest.TestCase):
             {"base": {"weights": {"image": -1}}},
             {"feet": {"weights": {"parallel": float("nan")}}},
             {"shared": {"image_sigma_px": 0}},
+            {"hands": {"self_collision_sigma_m": 0}},
+            {"hands": {"detection": {"release_lift_forearm_start": .5, "release_lift_forearm_end": .4}}},
             {"schema_version": 2},
         ]
         for patch in invalid:
